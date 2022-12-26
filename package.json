@@ -12,7 +12,8 @@
     "yarn": "^1.22.19"
   },
   "scripts": {
-    "start": "nodemon dotenv/config ./bin/server.js"
+    "start": "node ./bin/server.js",
+    "test": "nodemon dotenv/config ./bin/server.js"
   },
   "name": "cnpj",
   "version": "1.0.0",
