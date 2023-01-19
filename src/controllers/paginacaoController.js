@@ -11,13 +11,16 @@ if(process.env.API_KEY != null){
 const { PromisePool } = require('@supercharge/promise-pool')
 const fs = require('fs');
 const MAX_RETRIES = 5
-const cnae = 6621501
 
 //let json = require('./paginacao-result.json');
 
-async function getConsumo() {
-  const consumo = await consultarCNPJ.consumo(API_KEY)
-  console.log(consumo)
+exports.consumo = () => {
+  async function getConsumo() {
+    const consumo = await consultarCNPJ.consumo(API_KEY)
+    return consumo
+  }
+  let result = getConsumo()
+  return result
 }
 
 async function getCNPJ(cnpj) {
@@ -63,6 +66,12 @@ function parseResult(result) {
     if (item.estabelecimento.estado !== null && item.estabelecimento.estado !== undefined) {
       estado_nome = item.estabelecimento.estado.nome
     }
+    var inscricoes_estaduais = ""
+    if (item.estabelecimento.inscricoes_estaduais !== null && item.estabelecimento.inscricoes_estaduais !== undefined) {
+      if (item.estabelecimento.inscricoes_estaduais.length > 0) {
+        inscricoes_estaduais = item.estabelecimento.inscricoes_estaduais[0]
+      }
+    }
 
     var estabelecimento = {
       cnpj: item.estabelecimento.cnpj,
@@ -88,7 +97,7 @@ function parseResult(result) {
       telefone1: item.estabelecimento.ddd1 + item.estabelecimento.telefone1,
       telefone2: item.estabelecimento.ddd2 + item.estabelecimento.telefone2,
       fax: item.estabelecimento.ddd_fax + item.estabelecimento.fax,
-      inscricoes_estaduais: item.estabelecimento.inscricoes_estaduais[0],
+      inscricoes_estaduais: inscricoes_estaduais,
     } 
 
     return { estabelecimento, socios } 
@@ -108,16 +117,20 @@ function flat(array) {
   return result
 }
 
-async function fetchCNPJS(pages, result, attemptCount) {
+async function fetchCNPJS(pages, result, cnae) {
   if (pages.length == 0) return result;
-  if (attemptCount > MAX_RETRIES) {
-    return result
-  }
-  attemptCount ++
 
   const { results, errors } = await PromisePool.for(pages)
-  .withConcurrency(2)
+  .withConcurrency(10)
   .onTaskFinished((page, pool) => {
+    // var array = [0,25,50,75,100]
+    // var cicle = Math.round(pool.processedPercentage())
+    // if (array.includes(cicle)) {
+    //   console.log(`Progress: ${cicle}%`)  
+    //   console.log("page =" + page) 
+    // }
+    //console.log(cicle % array.length)
+    
     console.log("porcentagem =" + pool.processedPercentage())
     console.log("page =" + page) 
   })
@@ -127,23 +140,25 @@ async function fetchCNPJS(pages, result, attemptCount) {
   let newResults = result.concat(results)
   if (errors.length > 0) {
     const page_errors = errors.map(row => ( row.item ));
-    return await fetchCNPJS(page_errors, newResults, attemptCount)
+    return await fetchCNPJS(page_errors, newResults, cnae)
   } else {
+    console.log(`terminou paginação ${cnae}`)
     return newResults
   }
 }
 
-async function fetchInfo(cnpjs, result, attemptCount) {
+async function fetchInfo(cnpjs, result) {
   if (cnpjs.length == 0) return result;
-  if (attemptCount > MAX_RETRIES) {
-    return result
-  }
-  attemptCount ++
 
   const { results, errors } = await PromisePool.for(cnpjs)
-  .withConcurrency(30)
+  .withConcurrency(200)
   .onTaskFinished((cnpj, pool) => {
-    console.log(pool.processedPercentage())
+    // console.log(pool.processedPercentage())
+    var array = [0,25,50,75,100]
+    var cicle = Math.round(pool.processedPercentage());
+    if (array.includes(cicle)) {
+      console.log(`Progress: ${cicle}%`);
+    }
   })
   .process(async cnpj => {
     return await getCNPJ(cnpj)
@@ -151,8 +166,9 @@ async function fetchInfo(cnpjs, result, attemptCount) {
   let newResults = result.concat(results)
   if (errors.length > 0) {
     const cnpjs_errors = errors.map(row => ( row.item ));
-    return await fetchInfo(cnpjs_errors, newResults, attemptCount)
+    return await fetchInfo(cnpjs_errors, newResults)
   } else {
+    console.log(`terminou busca cnpjs`)
     return newResults 
   }
 }
@@ -169,37 +185,39 @@ function saveXLSX(data, name) {
   console.log("finished creating XLSX " + name)
 }
 
-exports.consultaCNAE = (req, res, next) => {
-  let cnae = req.params.cnae;
+function writeFileQ(workbook, filename) {
+    return new Promise((resolve, reject) => {
+        // the interface wasn't clearly documented, but this reasonable guess worked...
+        const wb_opts = {bookType: 'xlsx', type: 'binary'};
+        XLSX.writeFileAsync(filename, workbook, wb_opts, (error, result) => {
+          return (error)? reject(error) : resolve(`${filename} criado com sucesso`);
+        })
+    })
+}
+
+exports.consultaCNAE = (cnae) => {
   var firstPage = getPesquisa(cnae, 1)
-  firstPage
-  .then(function(json) {
-    var allPages = Array.from(Array(json.paginacao.paginas).keys())
-    
-    fetchCNPJS(allPages, [], 0)
+  return firstPage
+    .then(function(json) {
+      return Array.from(Array(json.paginacao.paginas).keys())
+    })
+    .then(function(result) {
+      return fetchCNPJS(result, [], cnae)
+    })
     .then(function(results) {
       let parsed = results.flatMap(item =>  item.data).map( row => ({ cnpj: row, }))
       let cnpjs = parsed.map (({cnpj}) => (cnpj));
-
-      fetchInfo(cnpjs, [], 0)
-      .then(function(infoResults) {
-          let parsed = parseResult(infoResults)
-          let data = flat(parsed)
-
-          const wb = XLSX.utils.book_new();                     // create workbook
-          const ws = XLSX.utils.json_to_sheet(data);            // convert data to sheet
-          XLSX.utils.book_append_sheet(wb, ws, 'users_sheet');  // add sheet to workbook
-
-          const filename = "users.xlsx";
-          const wb_opts = {bookType: 'xlsx', type: 'binary'};   // workbook options
-          XLSX.writeFile(wb, filename, wb_opts);                // write workbook file
-
-          res.setHeader('Content-Type', 'application/vnd.openxmlformats');
-          res.setHeader("Content-Disposition", "attachment; filename=Report-" + cnae + "-.xlsx");
-
-          const stream = fs.createReadStream(filename);         // create read stream
-          stream.pipe(res);
-      });
-    });
-  });
-};
+      return fetchInfo(cnpjs, [], 0)
+    })
+    .then(function(results) {
+      let parsed = parseResult(results)
+      let data = flat(parsed)
+      
+      const wb = XLSX.utils.book_new();                     // create workbook
+      const ws = XLSX.utils.json_to_sheet(data);          // convert data to sheet
+      XLSX.utils.book_append_sheet(wb, ws, 'data');
+      
+      const exportFileName = `workbook_${cnae}.xls`;
+      return writeFileQ(wb, exportFileName)
+    })
+}
